@@ -247,6 +247,7 @@ def process_image(images, connection, config, metadata):
     # data_img = nib.load('output_image.nii')
     # data = data_img.get_fdata()
     stat_data = stat_img.get_fdata()
+    n_stats = stat_data.shape[-1]
     data = np.concatenate([stat_data, data], axis=-1)
     logging.info("Output image data shape before transposing: %s", data.shape)
 
@@ -283,6 +284,11 @@ def process_image(images, connection, config, metadata):
         get_idx = lambda i, j: j + i * n_slices
         get_data = lambda data, i, j: data[..., i, j]
         get_rep = lambda i, j: i
+        # For stats images use the first repetition's headers/metas.
+        # This makes sure that the headers for stats images contain the
+        # correct orientation and position values. This is needed for
+        # `dcm2niix` to work correctly, for example.
+        get_header_idx = lambda i, j: j if (i - n_stats) < 0 else j + i * n_slices
     else:
         # Stack all repetitions of slice 0, then all repetitions of slice 1, etc
         outer_range = range(n_slices)
@@ -290,15 +296,27 @@ def process_image(images, connection, config, metadata):
         get_idx = lambda i, j: j + i * n_reps
         get_data = lambda data, i, j: data[..., j, i]
         get_rep = lambda i, j: j
+        # For stats images use the first repetition's headers/metas.
+        # This makes sure that the headers for stats images contain the
+        # correct orientation and position values. This is needed for
+        # `dcm2niix` to work correctly, for example.
+        get_header_idx = lambda i, j: i if (j - n_stats) < 0 else j + i * n_reps
 
-    # Re-slice image data back into 2D images
+    # Re-slice image data back into 2D images.
+    # Preallocate outputs for speed and efficiency.
     imagesOut = [None] * (n_reps * n_slices)
+    image_details = {
+        'slice': [None] * (n_reps * n_slices),
+        'repetition': [None] * (n_reps * n_slices),
+        'x': [None] * (n_reps * n_slices),
+        'y': [None] * (n_reps * n_slices)
+    }
     for i in outer_range:
         for j in inner_range:
             img_idx = get_idx(i, j)
             # Make sure that index that gets headers and meta stays in
-            # range. Use the first header/meta for stats images
-            head_meta_idx = 0 if ((n_reps * n_slices) - img_idx) > len(head) else len(head) - ((n_reps * n_slices) - img_idx)
+            # range. Use the first repetition's headers/metas for stats images
+            head_meta_idx = get_header_idx(i, j)
             # Create new MRD instance for the final image
             # Transpose from convenience shape of [y x z cha] to MRD Image shape of [cha z y x]
             # from_array() should be called with 'transpose=False' to avoid warnings, and when called
@@ -353,6 +371,21 @@ def process_image(images, connection, config, metadata):
             # logging.debug("Image data has %d elements", imagesOut[img_idx].data.size)
 
             imagesOut[img_idx].attribute_string = metaXml
+            # For debugging and troubleshooting.
+            image_details['slice'][img_idx] = i
+            image_details['repetition'][img_idx] = j
+            image_details['x'][img_idx] = imagesOut[img_idx].data.shape[0]
+            image_details['y'][img_idx] = imagesOut[img_idx].data.shape[1]
+
+    n_out_imgs = len(imagesOut)
+    x_not_same = np.any(np.array([np.diff(x) for x in image_details['x']]) != 0)
+    y_not_same = np.any(np.array([np.diff(y) for y in image_details['y']]) != 0)
+    logging.debug(f'Outputting {n_out_imgs} images with shape ({image_details['x'][0]}, {image_details['y'][0]})')
+    logging.debug(f'Slices: {image_details["slice"][:10]}; Repetitions: {image_details["repetition"][:10]}')
+    if x_not_same:
+        logging.warning('Output images have different x dimensions!')
+    if y_not_same:
+        logging.warning('Output images have different y dimensions!')
 
     return imagesOut
 
