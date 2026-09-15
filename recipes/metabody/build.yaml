@@ -1,5 +1,5 @@
 name: metabody
-version: 1.0.5
+version: 1.0.6
 architectures:
     - x86_64
 
@@ -180,9 +180,9 @@ build:
         - copy: nifti2mrd.py /opt/code/python-ismrmrd-server/nifti2mrd.py
         - copy: afni_processing.sh /opt/code/afni_processing.sh
         - run:
-              - mkdir -p /opt/code/stim_times
-              - git clone https://github.com/thomshaw92/BodyLocaliser.git /opt/code/BodyLocaliser && git -C /opt/code/BodyLocaliser checkout {{ context.upstream_commit }}
-              - cp /opt/code/BodyLocaliser/sub-1_TBS/sub-1_run-1*.1D /opt/code/stim_times/
+              - mkdir -p /opt/code/python-ismrmrd-server/bodylocaliser
+              - git clone --branch openrecon https://github.com/thomshaw92/BodyLocaliser.git /opt/code/BodyLocaliser
+              - cp /opt/code/BodyLocaliser/src/* /opt/code/python-ismrmrd-server/bodylocaliser/
 
         # install small pip packages
         - run:

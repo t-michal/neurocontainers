@@ -4,6 +4,8 @@ import os
 import subprocess
 import traceback
 from dataclasses import dataclass
+import time
+from collections import defaultdict
 
 import ismrmrd
 import matplotlib.pyplot as plt
@@ -13,6 +15,13 @@ import numpy as np
 import constants
 import mrdhelper
 
+# These files are pulled from the localiser task's codebase during the
+# container build.
+# https://github.com/thomshaw92/BodyLocaliser
+import sys
+sys.path.append('/opt/code/python-ismrmrd-server/bodylocaliser')
+from schedule import generate_trial_schedule, run_order_blocks
+import parameters
 
 # Folder for debug output files
 debugFolder = "/tmp/share/debug"
@@ -383,21 +392,32 @@ def process_image(images, connection, config, metadata):
     nib.save(new_img, 'nifti_from_h5.nii')
     logging.info('Saved NIfTI image for AFNI processing')
 
-    ## WRITE AFNI SCRIPTS HERE!!!!
+    onset_pairs = get_stimulus_files(config, skip_rest=True)
+    if repetition_time_seconds != parameters.TR:
+        logging.warning(
+            'Measured repetition time is %.3f seconds but the task parameters expect %.3f seconds. ' \
+            'AFNI will be run with %.3f seconds as the repetition time.',
+            repetition_time_seconds,
+            parameters.TR,
+            repetition_time_seconds,
+        )
+    # Only need the duration of the conditions, not rest.
+    stimulus_duration = parameters.TR * parameters.TRs_per_trial
+
     logging.info('Running AFNI processing')
     try:
-        subprocess.run(
-            [
-                "/opt/code/afni_processing.sh",
-                "--input",
-                "nifti_from_h5.nii",
-                "--output",
-                "output_afni",
-                "--tr",
-                f"{repetition_time_seconds:g}",
-            ],
-            check=True,
-        )
+        cmd = [
+            "/opt/code/afni_processing.sh",
+            "--input", "nifti_from_h5.nii",
+            "--output", "output_afni",
+            "--tr", f"{repetition_time_seconds:g}",
+            "--stim-dur", f"{stimulus_duration:g}",
+            "--skip-trs", f"{parameters.TRs_dummy_scans:g}",
+        ]
+        for label, path in onset_pairs:
+            cmd += ["--stim", f"{label}={path}"]
+
+        subprocess.run(cmd, check=True)
 
         logging.info('Running image transformation for showing stats')
         stat_labels, stat_img = show_stats(
@@ -643,3 +663,46 @@ def normalise_data(data):
     normalized_data = (data - min_val) / (max_val - min_val)
 
     return normalized_data
+
+
+def get_stimulus_files(config, skip_rest=True):
+    run_order_number = mrdhelper.get_json_config_param(
+        config, 'runOrder', default=1
+    )
+    # Get stimulus onset times for each condition in the run order.
+    schedule = generate_trial_schedule(run_order_blocks(run_order_number, None))
+    onset_dict = defaultdict(list)
+    for entry in schedule:
+        if skip_rest and entry['condition'].lower() == 'rest':
+            continue
+        onset_dict[entry['condition']].append(entry['simulated_onset'])
+
+    datetag = time.strftime("%Y_%m_%d_%H_%M")
+    onset_files = save_onset_1d_files(onset_dict, '/opt/code/python-ismrmrd-server/bodylocaliser/', 'for_afni', datetag)
+
+    return onset_files
+
+
+def save_onset_1d_files(onset_dict, data_dir, prefix, datetag):
+    """Write per-condition .1D onset files (AFNI format)."""
+    def condition_label(condition):
+        """
+        Create a label by taking the first two letters if the condition
+        is a single word, or the first letter of the firs two words if
+        multiple words.
+        """
+        parts = condition.split(' ')
+        if len(parts) == 1:
+            return parts[0][:2]
+        else:
+            return parts[0][0] + parts[1][0]
+
+    pairs = []
+    for condition, onsets in onset_dict.items():
+        if not onsets:
+            continue
+        path = os.path.join(data_dir, f"{prefix}_{condition.replace(' ', '_')}_{datetag}.1D")
+        with open(path, "w") as fh:
+            fh.write(" ".join(f"{o:.2f}" for o in onsets) + "\n")
+        pairs.append((condition_label(condition), path))
+    return pairs

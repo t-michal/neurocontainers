@@ -5,7 +5,7 @@
 set -euo pipefail
 
 # Parse arguments.
-PARSED=$(getopt --options "" --long input:,output:,n-threads:,tr:,stim-dur:,skip-trs: --name "$0" -- "$@")
+PARSED=$(getopt --options "" --long input:,output:,n-threads:,tr:,stim-dur:,skip-trs:,stim: --name "$0" -- "$@")
 # Terminate script if failed to parse arguments properly.
 if [[ $? -ne 0 ]]; then
     echo "Error parsing options" >&2
@@ -23,6 +23,8 @@ NTHREADS=`nproc`
 TR=1
 STIM_DUR=10
 SKIP_TRS=0
+STIM_LABELS=()
+STIM_FILES=()
 
 # Extract values from arguments. `--` indicates the end of arguments.
 while true; do
@@ -51,6 +53,17 @@ while true; do
 			SKIP_TRS="$2"
 			shift 2
 			;;
+        --stim)
+            echo "Parsing --stim argument: $2"
+            pair="$2"
+            if [[ "$pair" != *=* ]]; then
+                echo "Malformed --stim value (expected LABEL=PATH): $pair" >&2
+                exit 1
+            fi
+            STIM_LABELS+=("${pair%%=*}")
+            STIM_FILES+=("${pair#*=}")
+            shift 2
+            ;;
         --)
             shift
             break
@@ -61,6 +74,15 @@ while true; do
             ;;
     esac
 done
+
+if [[ ${#STIM_LABELS[@]} -eq 0 ]]; then
+    echo "No --stim label/file pairs provided" >&2
+    exit 1
+fi
+if [[ ${#STIM_LABELS[@]} -ne ${#STIM_FILES[@]} ]]; then
+    echo "Internal error: label/file count mismatch" >&2
+    exit 1
+fi
 
 mkdir -p "$OUTPUT"
 tmp_dir=$(mktemp -d /tmp/metabody-afni.XXXXXX)
@@ -140,23 +162,44 @@ echo "Running 3dDeconvolve..."
 #   -stim_times 5 timing/left_hand.1D "BLOCK(${STIM_DUR},1)" -stim_label 5 LH \
 #   -stim_times 6 timing/right_hand.1D "BLOCK(${STIM_DUR},1)" -stim_label 6 RH \
 #   -stim_times 7 timing/lips.1D "BLOCK(${STIM_DUR},1)" -stim_label 7 LP \
+
+# Build the arguments for stimulus onset times, e.g.:
+# -stim_times 1 "/path/to/sub-1_run-1_LEFT ELBOW_2024_10_31_00_07.1D" "BLOCK(${STIM_DUR},1)" -stim_label 1 LA \
+STIM_ARGS=()
+for i in "${!STIM_FILES[@]}"; do
+    idx=$((i+1))
+    f="${STIM_FILES[$i]}"
+    label="${STIM_LABELS[$i]}"
+    if [[ ! -f "$f" ]]; then
+        echo "Stim file not found: $f" >&2
+        exit 1
+    fi
+    STIM_ARGS+=(-stim_times "$idx" "$f" "BLOCK(${STIM_DUR},1)" -stim_label "$idx" "$label")
+done
+
+# Build the arguments for contrasts. It is always one condition against
+# the average of all other conditions, e.g.:
+# -gltsym 'SYM: LA -0.16667*LF -0.16667*LH -0.16667*LP -0.16667*RA -0.16667*RF -0.16667*RH' -glt_label 1 LA-others \
+N=${#STIM_LABELS[@]}
+GLT_ARGS=()
+glt_idx=1
+for label in "${STIM_LABELS[@]}"; do
+    others_weight=$(echo "scale=6; -1/($N-1)" | bc)
+    sym="SYM: ${label}"
+    for other in "${STIM_LABELS[@]}"; do
+        if [[ "$other" != "$label" ]]; then
+            sym+=" ${others_weight}*${other}"
+        fi
+    done
+    GLT_ARGS+=(-gltsym "$sym" -glt_label "$glt_idx" "${label}-others")
+    glt_idx=$((glt_idx+1))
+done
+
 3dDeconvolve \
   -input "pb01.r01.volreg+orig" \
-  -polort 4 -num_stimts 7 -local_times \
-  -stim_times 1 "/opt/code/stim_times/sub-1_run-1_LEFT ELBOW_2024_10_31_00_07.1D" "BLOCK(${STIM_DUR},1)" -stim_label 1 LA \
-  -stim_times 2 "/opt/code/stim_times/sub-1_run-1_RIGHT ELBOW_2024_10_31_00_07.1D" "BLOCK(${STIM_DUR},1)" -stim_label 2 RA \
-  -stim_times 3 "/opt/code/stim_times/sub-1_run-1_LEFT FOOT_2024_10_31_00_07.1D" "BLOCK(${STIM_DUR},1)" -stim_label 3 LF \
-  -stim_times 4 "/opt/code/stim_times/sub-1_run-1_RIGHT FOOT_2024_10_31_00_07.1D" "BLOCK(${STIM_DUR},1)" -stim_label 4 RF \
-  -stim_times 5 "/opt/code/stim_times/sub-1_run-1_LEFT HAND_2024_10_31_00_07.1D" "BLOCK(${STIM_DUR},1)" -stim_label 5 LH \
-  -stim_times 6 "/opt/code/stim_times/sub-1_run-1_RIGHT HAND_2024_10_31_00_07.1D" "BLOCK(${STIM_DUR},1)" -stim_label 6 RH \
-  -stim_times 7 "/opt/code/stim_times/sub-1_run-1_TONGUE_2024_10_31_00_07.1D" "BLOCK(${STIM_DUR},1)" -stim_label 7 LP \
-  -gltsym 'SYM: LA -0.16667*LF -0.16667*LH -0.16667*LP -0.16667*RA -0.16667*RF -0.16667*RH' -glt_label 1 LA-others \
-  -gltsym 'SYM: LF -0.16667*LA -0.16667*LH -0.16667*LP -0.16667*RA -0.16667*RF -0.16667*RH' -glt_label 2 LF-others \
-  -gltsym 'SYM: LH -0.16667*LA -0.16667*LF -0.16667*LP -0.16667*RA -0.16667*RF -0.16667*RH' -glt_label 3 LH-others \
-  -gltsym 'SYM: LP -0.16667*LA -0.16667*LF -0.16667*LH -0.16667*RA -0.16667*RF -0.16667*RH' -glt_label 4 LP-others \
-  -gltsym 'SYM: RA -0.16667*LA -0.16667*LF -0.16667*LH -0.16667*LP -0.16667*RF -0.16667*RH' -glt_label 5 RA-others \
-  -gltsym 'SYM: RF -0.16667*LA -0.16667*LF -0.16667*LH -0.16667*LP -0.16667*RA -0.16667*RH' -glt_label 6 RF-others \
-  -gltsym 'SYM: RH -0.16667*LA -0.16667*LF -0.16667*LH -0.16667*LP -0.16667*RA -0.16667*RF' -glt_label 7 RH-others \
+  -polort 4 -num_stimts "${#STIM_FILES[@]}" -local_times \
+  "${STIM_ARGS[@]}" \
+  "${GLT_ARGS[@]}" \
   -x1D design.xmat.1D \
   -bucket stats.nii \
   -tout -fout -bout \

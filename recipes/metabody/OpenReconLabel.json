@@ -92,6 +92,15 @@
       ],
       "default": "scanner_lut",
       "information": { "en": "Use the scanner palette, embed a color map in the image, or return grayscale." }
+    },
+    {
+      "id": "runOrder",
+      "label": { "en": "Run order" },
+      "type": "int",
+      "information": { "en": "The order of movements (integer; must match what is selected for the task that will be displayed)." },
+      "minimum": 1,
+      "maximum": 7,
+      "default": 1
     }
   ]
 }
